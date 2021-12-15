@@ -68,6 +68,7 @@ export Cell,
   subspace_expansion,
   translatecell,
   vumps,
+  vumps_evo,
   ⊕,
   ⊗,
   ×

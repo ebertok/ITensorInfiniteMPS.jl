@@ -196,6 +196,18 @@ function vumps_iteration(args...; multisite_update_alg="sequential", kwargs...)
   end
 end
 
+function vumps_evo_iteration(args...; multisite_update_alg="sequential", kwargs...)
+  if multisite_update_alg == "sequential"
+    return vumps_evo_iteration_sequential(args...; kwargs...)
+  elseif multisite_update_alg == "parallel"
+    return vumps_evo_iteration_parallel(args...; kwargs...)
+  else
+    error(
+      "Multisite update algorithm multisite_update_alg = $multisite_update_alg not supported, use \"parallel\" or \"sequential\"",
+    )
+  end
+end
+
 function vumps_iteration_sequential(
   ∑h::InfiniteITensorSum,
   ψ::InfiniteCanonicalMPS;
@@ -273,7 +285,7 @@ function vumps_iteration_sequential(
     Hᴿ = right_environment(hᴿ, ψ; tol=krylov_tol)
 
     Cvalsₙ₋₁, Cvecsₙ₋₁, Cinfoₙ₋₁ = eigsolve(
-      Hᶜ(∑h, Hᴸ, Hᴿ, ψ, n - 1), ψ.C[n - 1], 1, :SR; ishermitian=true, tol=krylov_tol
+      Hᶜ(∑h, Hᴸ, Hᴿ, ψ, n - 1), ψ.C[n - 1], 1, :SR; ishermitian=true, tol=krylov_tol #here, you would probably insert the exponential time step.
     )
     Cvalsₙ, Cvecsₙ, Cinfoₙ = eigsolve(
       Hᶜ(∑h, Hᴸ, Hᴿ, ψ, n), ψ.C[n], 1, :SR; ishermitian=true, tol=krylov_tol
@@ -281,6 +293,8 @@ function vumps_iteration_sequential(
     Avalsₙ, Avecsₙ, Ainfoₙ = eigsolve(
       Hᴬᶜ(∑h, Hᴸ, Hᴿ, ψ, n), ψ.AL[n] * ψ.C[n], 1, :SR; ishermitian=true, tol=krylov_tol
     )
+
+
     C̃[n - 1] = Cvecsₙ₋₁[1]
     C̃[n] = Cvecsₙ[1]
     Ãᶜ[n] = Avecsₙ[1]
@@ -322,6 +336,145 @@ function vumps_iteration_sequential(
   end
   return ψ, (eᴸ, eᴿ)
 end
+
+function vumps_evo_iteration_sequential(
+  ∑h::InfiniteITensorSum,
+  ψ::InfiniteCanonicalMPS,
+  dt;
+  (ϵᴸ!)=fill(1e-15, nsites(ψ)),
+  (ϵᴿ!)=fill(1e-15, nsites(ψ)),
+)
+  Nsites = nsites(ψ)
+  ϵᵖʳᵉˢ = max(maximum(ϵᴸ!), maximum(ϵᴿ!))
+  krylov_tol = ϵᵖʳᵉˢ / 100
+  ψᴴ = dag(ψ)
+  ψ′ = ψᴴ'
+  # XXX: make this prime the center sites
+  ψ̃ = prime(linkinds, ψᴴ)
+
+
+  # TODO: replace with linkinds(ψ)
+  l = CelledVector([commoninds(ψ.AL[n], ψ.AL[n + 1]) for n in 1:Nsites])
+  l′ = CelledVector([commoninds(ψ′.AL[n], ψ′.AL[n + 1]) for n in 1:Nsites])
+  r = CelledVector([commoninds(ψ.AR[n], ψ.AR[n + 1]) for n in 1:Nsites])
+  r′ = CelledVector([commoninds(ψ′.AR[n], ψ′.AR[n + 1]) for n in 1:Nsites])
+
+  ψ = copy(ψ)
+  C̃ = InfiniteMPS(Vector{ITensor}(undef, Nsites))
+  Ãᶜ = InfiniteMPS(Vector{ITensor}(undef, Nsites))
+  Ãᴸ = InfiniteMPS(Vector{ITensor}(undef, Nsites))
+  Ãᴿ = InfiniteMPS(Vector{ITensor}(undef, Nsites))
+  eᴸ = Vector{Float64}(undef, Nsites)
+  eᴿ = Vector{Float64}(undef, Nsites)
+
+  for n in 1:Nsites
+    hᴸ = InfiniteMPS([
+      δ(only(l[k - 2]), only(l′[k - 2])) *
+      ψ.AL[k - 1] *
+      ψ.AL[k] *
+      ∑h[(k - 1, k)] *
+      ψ′.AL[k - 1] *
+      ψ′.AL[k] for k in 1:Nsites
+    ])
+    hᴿ = InfiniteMPS([
+      δ(only(dag(r[k + 2])), only(dag(r′[k + 2]))) *
+      ψ.AR[k + 2] *
+      ψ.AR[k + 1] *
+      ∑h[(k + 1, k + 2)] *
+      ψ′.AR[k + 2] *
+      ψ′.AR[k + 1] for k in 1:Nsites
+    ])
+    eᴸ = [
+      (hᴸ[k] * ψ.C[k] * δ(only(dag(r[k])), only(dag(r′[k]))) * ψ′.C[k])[] for k in 1:Nsites
+    ]
+    eᴿ = [(hᴿ[k] * ψ.C[k] * δ(only(l[k]), only(l′[k])) * ψ′.C[k])[] for k in 1:Nsites]
+    for k in 1:Nsites
+      # TODO: remove `denseblocks` once BlockSparse + DiagBlockSparse is supported
+      hᴸ[k] -= eᴸ[k] * denseblocks(δ(inds(hᴸ[k])))
+      hᴿ[k] -= eᴿ[k] * denseblocks(δ(inds(hᴿ[k])))
+    end
+
+    function left_environment_cell(ψ, ψ̃, hᴸ, n)
+      Nsites = nsites(ψ)
+      𝕙ᴸ = copy(hᴸ)
+      for k in reverse((n - Nsites + 2):n)
+        𝕙ᴸ[k] = 𝕙ᴸ[k - 1] * ψ.AL[k] * ψ̃.AL[k] + 𝕙ᴸ[k]
+      end
+      return 𝕙ᴸ[n]
+    end
+
+    #for k in 2:Nsites
+    #  hᴸ[k] = hᴸ[k - 1] * ψ.AL[k] * ψ̃.AL[k] + hᴸ[k]
+    #end
+    𝕙ᴸ = copy(hᴸ)
+    for k in 1:Nsites
+      𝕙ᴸ[k] = left_environment_cell(ψ, ψ̃, hᴸ, k)
+    end
+    Hᴸ = left_environment(hᴸ, 𝕙ᴸ, ψ; tol=krylov_tol)
+    for k in 2:Nsites
+      hᴿ[k] = hᴿ[k + 1] * ψ.AR[k + 1] * ψ̃.AR[k + 1] + hᴿ[k]
+    end
+    Hᴿ = right_environment(hᴿ, ψ; tol=krylov_tol)
+
+    Cvecsₙ₋₁, Cinfoₙ₋₁ = ITensors.exponentiate(
+      Hᶜ(∑h, Hᴸ, Hᴿ, ψ, n - 1), -1im*dt, ψ.C[n - 1], ishermitian=false, tol=krylov_tol #here, you would probably insert the exponential time step.
+    )
+    Cvecsₙ, Cinfoₙ = ITensors.exponentiate(
+      Hᶜ(∑h, Hᴸ, Hᴿ, ψ, n), -1im*dt, ψ.C[n], ishermitian=false, tol=krylov_tol
+    )
+    Avecsₙ, Ainfoₙ = ITensors.exponentiate(
+      Hᴬᶜ(∑h, Hᴸ, Hᴿ, ψ, n),-1im*dt, ψ.AL[n] * ψ.C[n], ishermitian=false, tol=krylov_tol
+    )
+
+    println(norm(Cvecsₙ₋₁), "  ", norm(Cvecsₙ))
+    # C̃[n - 1] = Cvecsₙ₋₁/norm(Cvecsₙ₋₁)
+    # C̃[n] = Cvecsₙ/norm(Cvecsₙ)
+    C̃[n - 1] = Cvecsₙ₋₁
+    C̃[n] = Cvecsₙ
+    # return Cvecsₙ₋₁, Cvecsₙ
+
+    Ãᶜ[n] = Avecsₙ/norm(Avecsₙ)
+
+    # println(Cvecsₙ₋₁ * Cvecsₙ )
+
+    function ortho_overlap(AC, C)
+      AL, _ = polar(AC * dag(C), uniqueinds(AC, C))
+      return noprime(AL)
+    end
+
+    function ortho_polar(AC, C)
+      UAC, _ = polar(AC, uniqueinds(AC, C))
+      UC, _ = polar(C, commoninds(C, AC))
+      return noprime(UAC) * noprime(dag(UC))
+    end
+
+    Ãᴸ[n] = ortho_polar(Ãᶜ[n], C̃[n])
+    Ãᴿ[n] = ortho_polar(Ãᶜ[n], C̃[n - 1])
+
+    # Update state for next iteration
+    #ψ = InfiniteCanonicalMPS(Ãᴸ, C̃, Ãᴿ)
+    ψ.AL[n] = Ãᴸ[n]
+    ψ.AR[n] = Ãᴿ[n]
+    ψ.C[n - 1] = C̃[n - 1]
+    ψ.C[n] = C̃[n]
+    ψᴴ = dag(ψ)
+    ψ′ = ψᴴ'
+    # XXX: make this prime the center sites
+    ψ̃ = prime(linkinds, ψᴴ)
+
+    # TODO: replace with linkinds(ψ)
+    l = CelledVector([commoninds(ψ.AL[n], ψ.AL[n + 1]) for n in 1:Nsites])
+    l′ = CelledVector([commoninds(ψ′.AL[n], ψ′.AL[n + 1]) for n in 1:Nsites])
+    r = CelledVector([commoninds(ψ.AR[n], ψ.AR[n + 1]) for n in 1:Nsites])
+    r′ = CelledVector([commoninds(ψ′.AR[n], ψ′.AR[n + 1]) for n in 1:Nsites])
+  end
+  for n in 1:Nsites
+    ϵᴸ![n] = norm(Ãᶜ[n] - Ãᴸ[n] * C̃[n])
+    ϵᴿ![n] = norm(Ãᶜ[n] - C̃[n - 1] * Ãᴿ[n])
+  end
+  return ψ, (eᴸ, eᴿ)
+end
+
 
 function vumps_iteration_parallel(
   ∑h::InfiniteITensorSum,
@@ -376,10 +529,23 @@ function vumps_iteration_parallel(
   end
 
   # Sum the Hamiltonian terms in the unit cell
-  for n in 2:Nsites
-    hᴸ[n] = hᴸ[n - 1] * ψ.AL[n] * ψ̃.AL[n] + hᴸ[n]
+  function left_environment_cell(ψ, ψ̃, hᴸ, n)
+    Nsites = nsites(ψ)
+    𝕙ᴸ = copy(hᴸ)
+    for k in reverse((n - Nsites + 2):n)
+      𝕙ᴸ[k] = 𝕙ᴸ[k - 1] * ψ.AL[k] * ψ̃.AL[k] + 𝕙ᴸ[k]
+    end
+    return 𝕙ᴸ[n]
   end
-  Hᴸ = left_environment(hᴸ, ψ; tol=krylov_tol)
+
+  #for k in 2:Nsites
+  #  hᴸ[k] = hᴸ[k - 1] * ψ.AL[k] * ψ̃.AL[k] + hᴸ[k]
+  #end
+  𝕙ᴸ = copy(hᴸ)
+  for k in 1:Nsites
+    𝕙ᴸ[k] = left_environment_cell(ψ, ψ̃, hᴸ, k)
+  end
+  Hᴸ = left_environment(hᴸ, 𝕙ᴸ, ψ; tol=krylov_tol)
 
   for n in 2:Nsites
     hᴿ[n] = hᴿ[n + 1] * ψ.AR[n + 1] * ψ̃.AR[n + 1] + hᴿ[n]
@@ -419,6 +585,216 @@ function vumps_iteration_parallel(
   return InfiniteCanonicalMPS(Ãᴸ, C̃, Ãᴿ), (eᴸ, eᴿ)
 end
 
+
+# function vumps_iteration_parallel(
+#   ∑h::InfiniteITensorSum,
+#   ψ::InfiniteCanonicalMPS;
+#   (ϵᴸ!)=fill(1e-15, nsites(ψ)),
+#   (ϵᴿ!)=fill(1e-15, nsites(ψ)),
+# )
+#   Nsites = nsites(ψ)
+#   ϵᵖʳᵉˢ = max(maximum(ϵᴸ!), maximum(ϵᴿ!))
+#   krylov_tol = ϵᵖʳᵉˢ / 100
+#   ψᴴ = dag(ψ)
+#   ψ′ = ψᴴ'
+#   # XXX: make this prime the center sites
+#   ψ̃ = prime(linkinds, ψᴴ)
+
+#   # TODO: replace with linkinds(ψ)
+#   l = CelledVector([commoninds(ψ.AL[n], ψ.AL[n + 1]) for n in 1:Nsites])
+#   l′ = CelledVector([commoninds(ψ′.AL[n], ψ′.AL[n + 1]) for n in 1:Nsites])
+#   r = CelledVector([commoninds(ψ.AR[n], ψ.AR[n + 1]) for n in 1:Nsites])
+#   r′ = CelledVector([commoninds(ψ′.AR[n], ψ′.AR[n + 1]) for n in 1:Nsites])
+
+#   hᴸ = InfiniteMPS([
+#     δ(only(l[n - 2]), only(l′[n - 2])) *
+#     ψ.AL[n - 1] *
+#     ψ.AL[n] *
+#     ∑h[(n - 1, n)] *
+#     ψ′.AL[n - 1] *
+#     ψ′.AL[n] for n in 1:Nsites
+#   ])
+
+#   hᴿ = InfiniteMPS([
+#     δ(only(dag(r[n + 2])), only(dag(r′[n + 2]))) *
+#     ψ.AR[n + 2] *
+#     ψ.AR[n + 1] *
+#     ∑h[(n + 1, n + 2)] *
+#     ψ′.AR[n + 2] *
+#     ψ′.AR[n + 1] for n in 1:Nsites
+#   ])
+
+#   eᴸ = [
+#     (hᴸ[n] * ψ.C[n] * δ(only(dag(r[n])), only(dag(r′[n]))) * ψ′.C[n])[] for n in 1:Nsites
+#   ]
+#   eᴿ = [(hᴿ[n] * ψ.C[n] * δ(only(l[n]), only(l′[n])) * ψ′.C[n])[] for n in 1:Nsites]
+
+#   for n in 1:Nsites
+#     # TODO: use these instead, for now can't subtract
+#     # BlockSparse and DiagBlockSparse tensors
+#     #hᴸ[n] -= eᴸ[n] * δ(inds(hᴸ[n]))
+#     #hᴿ[n] -= eᴿ[n] * δ(inds(hᴿ[n]))
+#     hᴸ[n] -= eᴸ[n] * denseblocks(δ(inds(hᴸ[n])))
+#     hᴿ[n] -= eᴿ[n] * denseblocks(δ(inds(hᴿ[n])))
+#   end
+
+#   # Sum the Hamiltonian terms in the unit cell
+#   for n in 2:Nsites
+#     hᴸ[n] = hᴸ[n - 1] * ψ.AL[n] * ψ̃.AL[n] + hᴸ[n]
+#   end
+#   Hᴸ = left_environment(hᴸ, ψ; tol=krylov_tol)
+
+#   for n in 2:Nsites
+#     hᴿ[n] = hᴿ[n + 1] * ψ.AR[n + 1] * ψ̃.AR[n + 1] + hᴿ[n]
+#   end
+#   Hᴿ = right_environment(hᴿ, ψ; tol=krylov_tol)
+
+#   C̃ = InfiniteMPS(Vector{ITensor}(undef, Nsites))
+#   Ãᶜ = InfiniteMPS(Vector{ITensor}(undef, Nsites))
+#   for n in 1:Nsites
+#     Cvalsₙ, Cvecsₙ, Cinfoₙ = eigsolve(
+#       Hᶜ(∑h, Hᴸ, Hᴿ, ψ, n), ψ.C[n], 1, :SR; ishermitian=true, tol=krylov_tol
+#     )
+#     Avalsₙ, Avecsₙ, Ainfoₙ = eigsolve(
+#       Hᴬᶜ(∑h, Hᴸ, Hᴿ, ψ, n), ψ.AL[n] * ψ.C[n], 1, :SR; ishermitian=true, tol=krylov_tol
+#     )
+#     C̃[n] = Cvecsₙ[1]
+#     Ãᶜ[n] = Avecsₙ[1]
+#   end
+
+#   # TODO: based on minimum singular values of C̃, use more accurate
+#   # method for finding Ãᴸ, Ãᴿ
+#   Ãᴸ = InfiniteMPS(Vector{ITensor}(undef, Nsites))
+#   Ãᴿ = InfiniteMPS(Vector{ITensor}(undef, Nsites))
+#   for n in 1:Nsites
+#     Ãᴸⁿ, X = polar(Ãᶜ[n] * dag(C̃[n]), uniqueinds(Ãᶜ[n], C̃[n]))
+#     Ãᴿⁿ, _ = polar(Ãᶜ[n] * dag(C̃[n - 1]), uniqueinds(Ãᶜ[n], C̃[n - 1]))
+#     Ãᴸⁿ = noprime(Ãᴸⁿ)
+#     Ãᴿⁿ = noprime(Ãᴿⁿ)
+#     Ãᴸ[n] = Ãᴸⁿ
+#     Ãᴿ[n] = Ãᴿⁿ
+#   end
+
+#   for n in 1:Nsites
+#     ϵᴸ![n] = norm(Ãᶜ[n] - Ãᴸ[n] * C̃[n])
+#     ϵᴿ![n] = norm(Ãᶜ[n] - C̃[n - 1] * Ãᴿ[n])
+#   end
+#   return InfiniteCanonicalMPS(Ãᴸ, C̃, Ãᴿ), (eᴸ, eᴿ)
+# end
+
+
+function vumps_evo_iteration_parallel(
+  ∑h::InfiniteITensorSum,
+  ψ::InfiniteCanonicalMPS,
+  dt;
+  (ϵᴸ!)=fill(1e-15, nsites(ψ)),
+  (ϵᴿ!)=fill(1e-15, nsites(ψ)),
+)
+  Nsites = nsites(ψ)
+  ϵᵖʳᵉˢ = max(maximum(ϵᴸ!), maximum(ϵᴿ!))
+  krylov_tol = ϵᵖʳᵉˢ / 100
+  ψᴴ = dag(ψ)
+  ψ′ = ψᴴ'
+  # XXX: make this prime the center sites
+  ψ̃ = prime(linkinds, ψᴴ)
+
+  # TODO: replace with linkinds(ψ)
+  l = CelledVector([commoninds(ψ.AL[n], ψ.AL[n + 1]) for n in 1:Nsites])
+  l′ = CelledVector([commoninds(ψ′.AL[n], ψ′.AL[n + 1]) for n in 1:Nsites])
+  r = CelledVector([commoninds(ψ.AR[n], ψ.AR[n + 1]) for n in 1:Nsites])
+  r′ = CelledVector([commoninds(ψ′.AR[n], ψ′.AR[n + 1]) for n in 1:Nsites])
+
+  hᴸ = InfiniteMPS([
+    δ(only(l[n - 2]), only(l′[n - 2])) *
+    ψ.AL[n - 1] *
+    ψ.AL[n] *
+    ∑h[(n - 1, n)] *
+    ψ′.AL[n - 1] *
+    ψ′.AL[n] for n in 1:Nsites
+  ])
+
+  hᴿ = InfiniteMPS([
+    δ(only(dag(r[n + 2])), only(dag(r′[n + 2]))) *
+    ψ.AR[n + 2] *
+    ψ.AR[n + 1] *
+    ∑h[(n + 1, n + 2)] *
+    ψ′.AR[n + 2] *
+    ψ′.AR[n + 1] for n in 1:Nsites
+  ])
+
+  eᴸ = [
+    (hᴸ[n] * ψ.C[n] * δ(only(dag(r[n])), only(dag(r′[n]))) * ψ′.C[n])[] for n in 1:Nsites
+  ]
+  eᴿ = [(hᴿ[n] * ψ.C[n] * δ(only(l[n]), only(l′[n])) * ψ′.C[n])[] for n in 1:Nsites]
+
+  for n in 1:Nsites
+    # TODO: use these instead, for now can't subtract
+    # BlockSparse and DiagBlockSparse tensors
+    #hᴸ[n] -= eᴸ[n] * δ(inds(hᴸ[n]))
+    #hᴿ[n] -= eᴿ[n] * δ(inds(hᴿ[n]))
+    hᴸ[n] -= eᴸ[n] * denseblocks(δ(inds(hᴸ[n])))
+    hᴿ[n] -= eᴿ[n] * denseblocks(δ(inds(hᴿ[n])))
+  end
+
+  # Sum the Hamiltonian terms in the unit cell
+  function left_environment_cell(ψ, ψ̃, hᴸ, n)
+    Nsites = nsites(ψ)
+    𝕙ᴸ = copy(hᴸ)
+    for k in reverse((n - Nsites + 2):n)
+      𝕙ᴸ[k] = 𝕙ᴸ[k - 1] * ψ.AL[k] * ψ̃.AL[k] + 𝕙ᴸ[k]
+    end
+    return 𝕙ᴸ[n]
+  end
+
+  #for k in 2:Nsites
+  #  hᴸ[k] = hᴸ[k - 1] * ψ.AL[k] * ψ̃.AL[k] + hᴸ[k]
+  #end
+  𝕙ᴸ = copy(hᴸ)
+  for k in 1:Nsites
+    𝕙ᴸ[k] = left_environment_cell(ψ, ψ̃, hᴸ, k)
+  end
+  Hᴸ = left_environment(hᴸ, 𝕙ᴸ, ψ; tol=krylov_tol)
+
+  for n in 2:Nsites
+    hᴿ[n] = hᴿ[n + 1] * ψ.AR[n + 1] * ψ̃.AR[n + 1] + hᴿ[n]
+  end
+  Hᴿ = right_environment(hᴿ, ψ; tol=krylov_tol)
+
+  C̃ = InfiniteMPS(Vector{ITensor}(undef, Nsites))
+  Ãᶜ = InfiniteMPS(Vector{ITensor}(undef, Nsites))
+  for n in 1:Nsites
+    Cvecₙ, Cinfoₙ = ITensors.exponentiate(
+      Hᶜ(∑h, Hᴸ, Hᴿ, ψ, n), -1im*dt, ψ.C[n], ishermitian=false, tol=krylov_tol
+    )
+    Avecₙ, Ainfoₙ = ITensors.exponentiate(
+      Hᴬᶜ(∑h, Hᴸ, Hᴿ, ψ, n),-1im*dt, ψ.AL[n] * ψ.C[n], ishermitian=false, tol=krylov_tol
+    )
+
+    C̃[n] = Cvecₙ
+    Ãᶜ[n] = Avecₙ
+  end
+
+  # TODO: based on minimum singular values of C̃, use more accurate
+  # method for finding Ãᴸ, Ãᴿ
+  Ãᴸ = InfiniteMPS(Vector{ITensor}(undef, Nsites))
+  Ãᴿ = InfiniteMPS(Vector{ITensor}(undef, Nsites))
+  for n in 1:Nsites
+    Ãᴸⁿ, X = polar(Ãᶜ[n] * dag(C̃[n]), uniqueinds(Ãᶜ[n], C̃[n]))
+    Ãᴿⁿ, _ = polar(Ãᶜ[n] * dag(C̃[n - 1]), uniqueinds(Ãᶜ[n], C̃[n - 1]))
+    Ãᴸⁿ = noprime(Ãᴸⁿ)
+    Ãᴿⁿ = noprime(Ãᴿⁿ)
+    Ãᴸ[n] = Ãᴸⁿ
+    Ãᴿ[n] = Ãᴿⁿ
+  end
+
+  for n in 1:Nsites
+    ϵᴸ![n] = norm(Ãᶜ[n] - Ãᴸ[n] * C̃[n])
+    ϵᴿ![n] = norm(Ãᶜ[n] - C̃[n - 1] * Ãᴿ[n])
+  end
+  return InfiniteCanonicalMPS(Ãᴸ, C̃, Ãᴿ), (eᴸ, eᴿ)
+end
+
+
 function vumps(
   ∑h, ψ; maxiter=10, tol=1e-8, outputlevel=1, multisite_update_alg="sequential"
 )
@@ -435,6 +811,35 @@ function vumps(
     maxdimψ = maxlinkdim(ψ[0:(N + 1)])
     outputlevel > 0 && println(
       "VUMPS iteration $iter (out of maximum $maxiter). Bond dimension = $maxdimψ, energy = $((eᴸ, eᴿ)), ϵᵖʳᵉˢ = $ϵᵖʳᵉˢ, tol = $tol",
+    )
+    if ϵᵖʳᵉˢ < tol
+      println(
+        "Precision error $ϵᵖʳᵉˢ reached tolerance $tol, stopping VUMPS after $iter iterations (of a maximum $maxiter).",
+      )
+      break
+    end
+  end
+  return ψ
+end
+
+function vumps_evo(
+  ∑h, ψ, dt; maxiter=10, tol=1e-8, outputlevel=1, multisite_update_alg="sequential"
+)
+println(maxiter)
+  N = nsites(ψ)
+  (ϵᴸ!) = fill(tol, nsites(ψ))
+  (ϵᴿ!) = fill(tol, nsites(ψ))
+  outputlevel > 0 &&
+    println("Time Evolution: Running VUMPS with multisite_update_alg = $multisite_update_alg")
+
+  for iter in 1:maxiter
+    ψ, (eᴸ, eᴿ) = vumps_evo_iteration(
+      ∑h, ψ, dt; (ϵᴸ!)=(ϵᴸ!), (ϵᴿ!)=(ϵᴿ!), multisite_update_alg=multisite_update_alg
+    )
+    ϵᵖʳᵉˢ = max(maximum(ϵᴸ!), maximum(ϵᴿ!))
+    maxdimψ = maxlinkdim(ψ[0:(N + 1)])
+    outputlevel > 0 && println(
+      "VUMPS evolution $iter (out of maximum $maxiter). Bond dimension = $maxdimψ, energy = $((eᴸ, eᴿ)), ϵᵖʳᵉˢ = $ϵᵖʳᵉˢ, tol = $tol",
     )
     if ϵᵖʳᵉˢ < tol
       println(

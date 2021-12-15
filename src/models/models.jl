@@ -21,10 +21,10 @@ function InfiniteITensorSum(model::Model, s::Vector; kwargs...)
   return InfiniteITensorSum(model, infsiteinds(s); kwargs...)
 end
 
-function InfiniteITensorSum(model::Model, s::CelledVector; kwargs...)
+function InfiniteITensorSum(model::Model, s::CelledVector; kwargs...) ### this is called for constructing infinite MPO of my model.
   N = length(s)
   H = InfiniteITensorSum(N)
-  tensors = [ITensor(model, s[n], s[n + 1]; kwargs...) for n in 1:N]
+  tensors = [ITensor(model, s[n], s[n + 1], n; kwargs...) for n in 1:N]
   return InfiniteITensorSum(tensors)
 end
 
@@ -34,7 +34,13 @@ function ITensors.ITensor(model::Model, s1, s2; kwargs...)
 end
 
 function ITensors.ITensor(model::Model, s1::Index, s2::Index; kwargs...)
-  n1, n2 = 1, 2
+  n1, n2 = 1, 2                                                             ### this is wrong for staggered potential / hopping. only selects the first potential every time.
   opsum = OpSum(model, n1, n2; kwargs...)
+  return prod(MPO(opsum, [s1, s2]))
+end
+
+function ITensors.ITensor(model::Model, s1::Index, s2::Index, n; kwargs...)  ## fixed version for alternating hopping / potential
+  n1, n2 = 1, 2                                                             
+  opsum = OpSum(model, n1, n2, n; kwargs...)
   return prod(MPO(opsum, [s1, s2]))
 end

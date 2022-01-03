@@ -764,10 +764,10 @@ function vumps_evo_iteration_parallel(
   Ãᶜ = InfiniteMPS(Vector{ITensor}(undef, Nsites))
   for n in 1:Nsites
     Cvecₙ, Cinfoₙ = ITensors.exponentiate(
-      Hᶜ(∑h, Hᴸ, Hᴿ, ψ, n), -1im*dt, ψ.C[n], ishermitian=false, tol=krylov_tol
+      Hᶜ(∑h, Hᴸ, Hᴿ, ψ, n), -1im*dt, ψ.C[n], ishermitian=true, tol=krylov_tol
     )
     Avecₙ, Ainfoₙ = ITensors.exponentiate(
-      Hᴬᶜ(∑h, Hᴸ, Hᴿ, ψ, n),-1im*dt, ψ.AL[n] * ψ.C[n], ishermitian=false, tol=krylov_tol
+      Hᴬᶜ(∑h, Hᴸ, Hᴿ, ψ, n),-1im*dt, ψ.AL[n] * ψ.C[n], ishermitian=true, tol=krylov_tol
     )
 
     C̃[n] = Cvecₙ

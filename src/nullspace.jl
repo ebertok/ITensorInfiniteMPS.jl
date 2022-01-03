@@ -72,7 +72,7 @@ function blocksparsetensor(blocks::Dict{B,TB}) where {B,TB}
       indsTn[bn] = indsTb[n]
     end
   end
-  T = BlockSparseTensor(indsT)
+  T = BlockSparseTensor(ComplexF64,indsT)
   for (b, Tb) in pairs(blocks)
     if !isempty(Tb)
       T[b] = Tb

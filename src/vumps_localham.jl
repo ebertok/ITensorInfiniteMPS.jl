@@ -825,7 +825,6 @@ end
 function vumps_evo(
   ∑h, ψ, dt; maxiter=10, tol=1e-8, outputlevel=1, multisite_update_alg="sequential"
 )
-println(maxiter)
   N = nsites(ψ)
   (ϵᴸ!) = fill(tol, nsites(ψ))
   (ϵᴿ!) = fill(tol, nsites(ψ))

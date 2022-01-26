@@ -417,25 +417,18 @@ function vumps_evo_iteration_sequential(
     Hᴿ = right_environment(hᴿ, ψ; tol=krylov_tol)
 
     Cvecsₙ₋₁, Cinfoₙ₋₁ = ITensors.exponentiate(
-      Hᶜ(∑h, Hᴸ, Hᴿ, ψ, n - 1), -1im*dt, ψ.C[n - 1], ishermitian=false, tol=krylov_tol #here, you would probably insert the exponential time step.
+      Hᶜ(∑h, Hᴸ, Hᴿ, ψ, n - 1), -1im*dt, ψ.C[n - 1], ishermitian=true, tol=krylov_tol
     )
     Cvecsₙ, Cinfoₙ = ITensors.exponentiate(
-      Hᶜ(∑h, Hᴸ, Hᴿ, ψ, n), -1im*dt, ψ.C[n], ishermitian=false, tol=krylov_tol
+      Hᶜ(∑h, Hᴸ, Hᴿ, ψ, n), -1im*dt, ψ.C[n], ishermitian=true, tol=krylov_tol
     )
     Avecsₙ, Ainfoₙ = ITensors.exponentiate(
-      Hᴬᶜ(∑h, Hᴸ, Hᴿ, ψ, n),-1im*dt, ψ.AL[n] * ψ.C[n], ishermitian=false, tol=krylov_tol
+      Hᴬᶜ(∑h, Hᴸ, Hᴿ, ψ, n),-1im*dt, ψ.AL[n] * ψ.C[n], ishermitian=true, tol=krylov_tol
     )
 
-    println(norm(Cvecsₙ₋₁), "  ", norm(Cvecsₙ))
-    # C̃[n - 1] = Cvecsₙ₋₁/norm(Cvecsₙ₋₁)
-    # C̃[n] = Cvecsₙ/norm(Cvecsₙ)
     C̃[n - 1] = Cvecsₙ₋₁
     C̃[n] = Cvecsₙ
-    # return Cvecsₙ₋₁, Cvecsₙ
-
-    Ãᶜ[n] = Avecsₙ/norm(Avecsₙ)
-
-    # println(Cvecsₙ₋₁ * Cvecsₙ )
+    Ãᶜ[n] = Avecsₙ
 
     function ortho_overlap(AC, C)
       AL, _ = polar(AC * dag(C), uniqueinds(AC, C))
